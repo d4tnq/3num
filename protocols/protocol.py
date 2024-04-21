@@ -1,8 +1,9 @@
 import os
 import threading
 import subprocess
-from lib.colors import debug, info, warn, error, fail, e, Style, Fore
 import multiprocessing
+from lib.colors import debug, info, error, Fore, Style
+
 class Protocol:
     def __init__(self, host, port, service, basedir, verbose):
         self.host = host
@@ -11,60 +12,45 @@ class Protocol:
         self.basedir = basedir
         self.verbose = verbose
 
-    def dump_pipe(self, stream, stop_event=None, tag='?', color=Fore.BLUE):
-        while stream.readable() and (stop_event is not None and not stop_event.is_set()):
-            line = stream.readline().decode('utf-8').rstrip()
+    def _dump_pipe(self, stream, stop_event, tag, color):
+        while not stop_event.is_set():
+            line = stream.readline().decode('utf-8').strip()
+            if line and self.verbose >= 1:
+                debug(f'{color}[{Style.BRIGHT}{tag}{Style.NORMAL}] {Fore.RESET}{line}', color=color)
 
-            if len(line) != 0 and int(self.verbose) >= 1:
-                debug(color + '[' + Style.BRIGHT + tag + Style.NORMAL + '] ' + Fore.RESET + '{line}', color=color)
+    def run_cmd(self, cmd, tag):
+        redirect = self.verbose >= 2
+        info(f'Running task {Fore.GREEN}{tag}{Fore.RESET}' + (f' with {Fore.BLUE}{cmd}{Fore.RESET}' if self.verbose >= 1 else '...'))
+        
+        with subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+            if redirect:
+                thdout_event = threading.Event()
+                thderr_event = threading.Event()
+                threading.Thread(target=self._dump_pipe, args=(proc.stdout, thdout_event, tag, Fore.BLUE)).start()
+                threading.Thread(target=self._dump_pipe, args=(proc.stderr, thderr_event, tag, Fore.RED)).start()
 
+            ret = proc.wait()
 
-    def run_cmd(self, cmd, tag='?', redirect=None):
-        if redirect is None:
-            redirect = int(self.verbose) >= 2
+            if redirect:
+                thdout_event.set()
+                thderr_event.set()
 
-        info('Running' + ' task {bgreen}{tag}{rst}' + (' with {bblue}{cmd}{rst}' if self.verbose >= 1 else '...'))
-
-
-        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE if redirect else subprocess.DEVNULL, stderr=subprocess.PIPE if redirect else subprocess.DEVNULL)
-
-        if redirect:
-            thdout = threading.Event()
-            thderr = threading.Event()
-
-            threading.Thread(target=self.dump_pipe, args=(proc.stdout, thdout, tag)).start()
-            threading.Thread(target=self.dump_pipe, args=(proc.stderr, thderr, tag, Fore.RED)).start()
-
-        ret = proc.wait()
-
-        if redirect:
-            thdout.set()
-            thderr.set()
-
-        if ret != 0:
-            error('Task {bred}{tag}{rst} returned non-zero exit code: {ret}')
-        else:
-            info('Task {bgreen}{tag}{rst} finished successfully.')
+            if ret:
+                error(f'Task {Fore.RED}{tag}{Fore.RESET} returned non-zero exit code: {ret}')
+            else:
+                info(f'Task {Fore.GREEN}{tag}{Fore.RESET} finished successfully.')
 
         return ret == 0
 
-
     def run_cmds(self, cmds):
-        procs = []
-
-        for cmd in cmds:
-            proc = multiprocessing.Process(target=self.run_cmd, args=cmd)
-            procs.append(proc)
+        processes = [multiprocessing.Process(target=self.run_cmd, args=cmd) for cmd in cmds]
+        for proc in processes:
             proc.start()
-
- 
+        for proc in processes:
+            proc.join()
 
     def create_msf_cmd(self, params):
-        cmd = "msfconsole -q -x '"
-        for param in params:
-            cmd += "use " + param["path"] + ";"
-            for key in param["toset"]:
-                cmd += "set "+key+" "+param["toset"][key]+";"
-            cmd += "run;"
-        cmd += "exit'"
-        return cmd
+        return "msfconsole -q -x '" + "; ".join(
+            f"use {p['path']}; " + "; ".join(f"set {k} {v}" for k, v in p['toset'].items()) + "; run" for p in params
+        ) + "; exit'"
+
